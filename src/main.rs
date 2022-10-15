@@ -3,8 +3,11 @@ use std::{
     net::SocketAddr,
 };
 
-use api::{sections, SectionInfo, TimeRange, Timeslot};
+use crate::api::{
+    available_majors, courses, sections, CourseInfo, SectionInfo, TimeRange, Timeslot,
+};
 use axum::{
+    extract::Path,
     routing::{get, post},
     Json, Router,
 };
@@ -135,10 +138,30 @@ async fn build_schedule(
     Ok(Json(found))
 }
 
+async fn get_available_majors() -> Result<Json<HashMap<String, String>>, StatusCode> {
+    Ok(Json(
+        available_majors()
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    ))
+}
+
+async fn get_available_courses(
+    Path(major): Path<String>,
+) -> Result<Json<HashMap<String, CourseInfo>>, StatusCode> {
+    Ok(Json(
+        courses(&major)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    ))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let app = Router::new()
         .route("/", get(|| async { "UMDB" }))
+        .route("/majors", get(get_available_majors))
+        .route("/courses/:major", get(get_available_courses))
         .route("/build_schedule", post(build_schedule));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 6007));
