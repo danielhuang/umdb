@@ -14,9 +14,13 @@ use axum::{
 use eyre::Result;
 use once_cell::sync::Lazy;
 use rand::{seq::SliceRandom, thread_rng};
-use reqwest::{Client, StatusCode};
+use reqwest::{
+    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, REFERER},
+    Client, StatusCode,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tower_http::cors::CorsLayer;
 
 mod api;
 
@@ -162,7 +166,13 @@ async fn main() -> Result<()> {
         .route("/", get(|| async { "UMDB" }))
         .route("/majors", get(get_available_majors))
         .route("/courses/:major", get(get_available_courses))
-        .route("/build_schedule", post(build_schedule));
+        .route("/build_schedule", post(build_schedule))
+        .layer(CorsLayer::permissive().allow_headers(vec![
+            AUTHORIZATION,
+            CONTENT_TYPE,
+            ACCEPT,
+            REFERER,
+        ]));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 6007));
     axum::Server::bind(&addr)

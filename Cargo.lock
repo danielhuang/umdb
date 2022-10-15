@@ -1497,6 +1497,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "tower-http",
 ]
 
 [[package]]
