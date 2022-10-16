@@ -13,19 +13,19 @@ pub struct TimeRange {
     pub end_time: i32,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug, Default)]
-pub struct Weekdays {
-    pub monday: bool,
-    pub tuesday: bool,
-    pub wednesday: bool,
-    pub thursday: bool,
-    pub friday: bool,
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum Weekday {
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub struct Timeslot {
     pub location: String,
-    pub days: Weekdays,
+    pub days: Vec<Weekday>,
     pub time_range: TimeRange,
     pub discussion: bool,
 }
@@ -223,12 +223,30 @@ pub async fn sections(id: &str) -> Result<Vec<SectionInfo>> {
 
                 Some(Timeslot {
                     location,
-                    days: Weekdays {
-                        monday: days.contains('M'),
-                        tuesday: days.contains("Tu"),
-                        wednesday: days.contains('W'),
-                        thursday: days.contains("Th"),
-                        friday: days.contains('F'),
+                    days: {
+                        let mut v = vec![];
+
+                        if days.contains('M') {
+                            v.push(Weekday::Monday)
+                        }
+
+                        if days.contains("Tu") {
+                            v.push(Weekday::Tuesday)
+                        }
+
+                        if days.contains('W') {
+                            v.push(Weekday::Wednesday)
+                        }
+
+                        if days.contains("Th") {
+                            v.push(Weekday::Thursday)
+                        }
+
+                        if days.contains('F') {
+                            v.push(Weekday::Friday)
+                        }
+
+                        v
                     },
                     time_range: TimeRange {
                         start_time: parse_time(&start_time)?,

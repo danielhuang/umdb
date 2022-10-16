@@ -41,7 +41,7 @@ struct Plan {
 }
 
 fn timeslot_conflict(a: &Timeslot, b: &Timeslot) -> bool {
-    a.days == b.days && timerange_conflict(&a.time_range, &b.time_range)
+    a.days.iter().any(|x| b.days.contains(x)) && timerange_conflict(&a.time_range, &b.time_range)
 }
 
 fn timerange_conflict(a: &TimeRange, b: &TimeRange) -> bool {
@@ -137,7 +137,10 @@ async fn build_schedule(
     };
 
     let mut found = vec![];
-    solve(&mut plan, &mut found).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    solve(&mut plan, &mut found).map_err(|e| {
+        dbg!(&e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok(Json(found))
 }
@@ -153,11 +156,10 @@ async fn get_available_majors() -> Result<Json<HashMap<String, String>>, StatusC
 async fn get_available_courses(
     Path(major): Path<String>,
 ) -> Result<Json<HashMap<String, CourseInfo>>, StatusCode> {
-    Ok(Json(
-        courses(&major)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-    ))
+    Ok(Json(courses(&major).await.map_err(|e| {
+        dbg!(&e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?))
 }
 
 #[tokio::main]
