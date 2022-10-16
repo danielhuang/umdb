@@ -130,6 +130,8 @@ fn parse_time(s: &str) -> Option<i32> {
 }
 
 pub async fn sections(id: &str) -> Result<Vec<SectionInfo>> {
+    dbg!(&id);
+
     let html = CLIENT
         .get("https://app.testudo.umd.edu/soc/202301/sections")
         .query(&[("courseIds", id)])

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
 };
 
@@ -32,7 +32,7 @@ pub struct CourseId {
     pub ident: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Plan {
     required_courses: Vec<String>,
     available_sections: HashMap<String, Vec<SectionInfo>>,
@@ -129,20 +129,59 @@ async fn build_schedule(
         available_sections.insert(course.clone(), s);
     }
 
-    let mut plan = Plan {
+    let plan = Plan {
         required_courses,
         available_sections,
         avoid_instructors,
         avoid_time_ranges,
     };
 
+    let found = solve_plan(plan)?;
+
+    Ok(Json(found.into_iter().collect()))
+}
+
+fn solve_plan(mut plan: Plan) -> Result<HashMap<String, SectionInfo>, StatusCode> {
     let mut found = vec![];
     solve(&mut plan, &mut found).map_err(|e| {
         dbg!(&e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+    Ok(found.into_iter().collect())
+}
 
-    Ok(Json(found))
+async fn build_schedules(
+    Json(req): Json<ScheduleRequest>,
+) -> Result<Json<HashSet<BTreeMap<String, SectionInfo>>>, StatusCode> {
+    let ScheduleRequest {
+        required_courses,
+        avoid_instructors,
+        avoid_time_ranges,
+    } = req;
+
+    let mut available_sections = HashMap::new();
+
+    for course in required_courses.iter() {
+        let s = sections(course)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        available_sections.insert(course.clone(), s);
+    }
+
+    let plan = Plan {
+        required_courses,
+        available_sections,
+        avoid_instructors,
+        avoid_time_ranges,
+    };
+
+    let mut all = vec![];
+    for _ in 0..10 {
+        let found = solve_plan(plan.clone())?;
+        all.push(found.into_iter().collect());
+    }
+
+    Ok(Json(all.into_iter().collect()))
 }
 
 async fn get_available_majors() -> Result<Json<HashMap<String, String>>, StatusCode> {
@@ -169,6 +208,7 @@ async fn main() -> Result<()> {
         .route("/majors", get(get_available_majors))
         .route("/courses/:major", get(get_available_courses))
         .route("/build_schedule", post(build_schedule))
+        .route("/build_schedules", post(build_schedules))
         .layer(CorsLayer::permissive().allow_headers(vec![
             AUTHORIZATION,
             CONTENT_TYPE,
