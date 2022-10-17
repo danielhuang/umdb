@@ -45,7 +45,7 @@ fn timeslot_conflict(a: &Timeslot, b: &Timeslot) -> bool {
 }
 
 fn timerange_conflict(a: &TimeRange, b: &TimeRange) -> bool {
-    a.start_time <= b.end_time && b.start_time <= a.end_time
+    a.start_time < b.end_time && b.start_time < a.end_time
 }
 
 fn section_conflict(found: impl Iterator<Item = SectionInfo>, b: &SectionInfo) -> bool {
