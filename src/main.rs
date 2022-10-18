@@ -176,7 +176,7 @@ async fn build_schedules(
     };
 
     let mut all = vec![];
-    for _ in 0..10 {
+    for _ in 0..100 {
         let found = solve_plan(plan.clone())?;
         all.push(found.into_iter().collect());
     }
