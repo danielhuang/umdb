@@ -12,6 +12,7 @@ use axum::{
     Json, Router,
 };
 use eyre::Result;
+use futures::future::try_join_all;
 use once_cell::sync::Lazy;
 use rand::{seq::SliceRandom, thread_rng};
 use reqwest::{
@@ -125,14 +126,16 @@ async fn build_schedule(
         seats_required,
     } = req;
 
-    let mut available_sections = HashMap::new();
-
-    for course in required_courses.iter() {
+    let available_sections = try_join_all(required_courses.iter().map(|course| async move {
         let s = sections(course)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        available_sections.insert(course.clone(), s);
-    }
+
+        Ok((course.clone(), s)) as Result<_, StatusCode>
+    }))
+    .await?
+    .into_iter()
+    .collect();
 
     let plan = Plan {
         required_courses,
