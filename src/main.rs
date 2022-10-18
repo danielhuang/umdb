@@ -38,6 +38,7 @@ struct Plan {
     available_sections: HashMap<String, Vec<SectionInfo>>,
     avoid_instructors: HashSet<String>,
     avoid_time_ranges: Vec<TimeRange>,
+    seats_required: i32,
 }
 
 fn timeslot_conflict(a: &Timeslot, b: &Timeslot) -> bool {
@@ -85,6 +86,7 @@ fn solve(plan: &mut Plan, found: &mut Vec<(String, SectionInfo)>) -> Result<(), 
             if !section_conflict(found.iter().cloned().map(|x| x.1), &section)
                 && !plan.avoid_instructors.contains(&section.prof)
                 && !section_must_avoid(&section, plan.avoid_time_ranges.iter().cloned())
+                && (section.open_seats - section.waitlist_seats) >= plan.seats_required
             {
                 found.push((next.clone(), section));
 
@@ -109,6 +111,8 @@ pub struct ScheduleRequest {
     required_courses: Vec<String>,
     avoid_instructors: HashSet<String>,
     avoid_time_ranges: Vec<TimeRange>,
+    #[serde(default)]
+    seats_required: i32,
 }
 
 async fn build_schedule(
@@ -118,6 +122,7 @@ async fn build_schedule(
         required_courses,
         avoid_instructors,
         avoid_time_ranges,
+        seats_required,
     } = req;
 
     let mut available_sections = HashMap::new();
@@ -134,6 +139,7 @@ async fn build_schedule(
         available_sections,
         avoid_instructors,
         avoid_time_ranges,
+        seats_required,
     };
 
     let found = solve_plan(plan)?;
@@ -157,6 +163,7 @@ async fn build_schedules(
         required_courses,
         avoid_instructors,
         avoid_time_ranges,
+        seats_required,
     } = req;
 
     let mut available_sections = HashMap::new();
@@ -173,6 +180,7 @@ async fn build_schedules(
         available_sections,
         avoid_instructors,
         avoid_time_ranges,
+        seats_required,
     };
 
     let mut all = vec![];
