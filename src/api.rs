@@ -43,6 +43,14 @@ pub struct CourseInfo {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct DetailedCourseInfo {
+    pub title: String,
+    pub credits: i32,
+    pub desc: String,
+    pub geneds: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct SectionInfo {
     pub id: String,
     pub prof: String,
@@ -76,7 +84,7 @@ pub async fn available_majors() -> Result<HashMap<String, String>> {
     Ok(rows)
 }
 
-pub async fn courses(major: &str) -> Result<HashMap<String, CourseInfo>> {
+pub async fn courses(major: &str) -> Result<HashMap<String, DetailedCourseInfo>> {
     let html = CLIENT
         .get(format!("https://app.testudo.umd.edu/soc/202301/{}", major))
         .send()
@@ -102,6 +110,13 @@ pub async fn courses(major: &str) -> Result<HashMap<String, CourseInfo>> {
             .next()?
             .to_string();
 
+        let desc = row
+            .select(&Selector::parse(".approved-course-text").unwrap())
+            .last()?
+            .text()
+            .next()?
+            .to_string();
+
         let credits = row
             .select(&Selector::parse(".course-min-credits").unwrap())
             .next()?
@@ -110,7 +125,20 @@ pub async fn courses(major: &str) -> Result<HashMap<String, CourseInfo>> {
             .parse()
             .ok()?;
 
-        Some((id, CourseInfo { title, credits }))
+        let geneds = row
+            .select(&Selector::parse(".course-subcategory").unwrap())
+            .map(|x| x.text().collect::<String>().trim().to_string())
+            .collect();
+
+        Some((
+            id,
+            DetailedCourseInfo {
+                title,
+                credits,
+                desc,
+                geneds,
+            },
+        ))
     });
 
     Ok(r.collect())

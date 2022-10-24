@@ -1,18 +1,20 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
+    time::Instant,
 };
 
 use crate::api::{
     available_majors, courses, sections, CourseInfo, SectionInfo, TimeRange, Timeslot,
 };
+use api::DetailedCourseInfo;
 use axum::{
     extract::Path,
     routing::{get, post},
     Json, Router,
 };
 use eyre::Result;
-use futures::future::try_join_all;
+use itertools::Itertools;
 use once_cell::sync::Lazy;
 use rand::{seq::SliceRandom, thread_rng};
 use reqwest::{
@@ -35,11 +37,13 @@ pub struct CourseId {
 
 #[derive(Debug, Clone)]
 struct Plan {
-    required_courses: Vec<String>,
-    available_sections: HashMap<String, Vec<SectionInfo>>,
+    required_courses: HashSet<CourseInfo>,
+    available_courses: Vec<CourseInfo>,
+    available_sections: HashMap<CourseInfo, Vec<SectionInfo>>,
     avoid_instructors: HashSet<String>,
     avoid_time_ranges: Vec<TimeRange>,
     seats_required: i32,
+    min_credits: i32,
 }
 
 fn timeslot_conflict(a: &Timeslot, b: &Timeslot) -> bool {
@@ -78,84 +82,64 @@ fn section_must_avoid(x: &SectionInfo, avoid: impl Iterator<Item = TimeRange>) -
 #[error("constraints not satisfiable")]
 struct Unsolvable;
 
-fn solve(plan: &mut Plan, found: &mut Vec<(String, SectionInfo)>) -> Result<(), Unsolvable> {
-    if let Some(next) = plan.required_courses.pop() {
-        let mut available = plan.available_sections[&next].clone();
+fn solve(plan: &mut Plan, found: &mut HashMap<CourseInfo, SectionInfo>) -> Result<(), Unsolvable> {
+    if (found.iter().map(|x| x.0.credits).sum::<i32>() >= plan.min_credits)
+        && plan.required_courses.iter().all(|x| found.contains_key(x))
+    {
+        return Ok(());
+    }
+
+    for available_course in plan
+        .available_courses
+        .clone()
+        .into_iter()
+        .filter(|x| !found.contains_key(x))
+        .sorted_by_key(|x| !plan.required_courses.contains(x))
+    {
+        let mut available = plan.available_sections[&available_course].clone();
         available.shuffle(&mut thread_rng());
 
         for section in available {
-            if !section_conflict(found.iter().cloned().map(|x| x.1), &section)
+            if !section_conflict(found.values().cloned(), &section)
                 && !plan.avoid_instructors.contains(&section.prof)
                 && !section_must_avoid(&section, plan.avoid_time_ranges.iter().cloned())
                 && (section.open_seats - section.waitlist_seats) >= plan.seats_required
             {
-                found.push((next.clone(), section));
+                found.insert(available_course.clone(), section);
 
                 if let Ok(()) = solve(plan, found) {
                     return Ok(());
                 }
 
-                found.pop();
+                found.remove(&available_course);
             }
         }
-
-        plan.required_courses.push(next);
-
-        Err(Unsolvable)
-    } else {
-        Ok(())
     }
+
+    Err(Unsolvable)
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct ScheduleRequest {
-    required_courses: Vec<String>,
+    required_courses: HashSet<CourseInfo>,
+    optional_courses: Vec<CourseInfo>,
     avoid_instructors: HashSet<String>,
     avoid_time_ranges: Vec<TimeRange>,
     #[serde(default)]
     seats_required: i32,
+    #[serde(default)]
+    min_credits: i32,
 }
 
-async fn build_schedule(
-    Json(req): Json<ScheduleRequest>,
-) -> Result<Json<Vec<(String, SectionInfo)>>, StatusCode> {
-    let ScheduleRequest {
-        required_courses,
-        avoid_instructors,
-        avoid_time_ranges,
-        seats_required,
-    } = req;
-
-    let available_sections = try_join_all(required_courses.iter().map(|course| async move {
-        let s = sections(course)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        Ok((course.clone(), s)) as Result<_, StatusCode>
-    }))
-    .await?
-    .into_iter()
-    .collect();
-
-    let plan = Plan {
-        required_courses,
-        available_sections,
-        avoid_instructors,
-        avoid_time_ranges,
-        seats_required,
-    };
-
-    let found = solve_plan(plan)?;
-
-    Ok(Json(found.into_iter().collect()))
-}
-
-fn solve_plan(mut plan: Plan) -> Result<HashMap<String, SectionInfo>, StatusCode> {
-    let mut found = vec![];
+fn solve_plan(mut plan: Plan) -> Result<HashMap<CourseInfo, SectionInfo>, StatusCode> {
+    let start = Instant::now();
+    let mut found = HashMap::new();
     solve(&mut plan, &mut found).map_err(|e| {
         dbg!(&e);
+        dbg!(&start.elapsed());
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+    dbg!(&start.elapsed());
     Ok(found.into_iter().collect())
 }
 
@@ -167,29 +151,37 @@ async fn build_schedules(
         avoid_instructors,
         avoid_time_ranges,
         seats_required,
+        optional_courses,
+        min_credits,
     } = req;
 
     let mut available_sections = HashMap::new();
 
-    for course in required_courses.iter() {
-        let s = sections(course)
+    for course in required_courses.iter().chain(optional_courses.iter()) {
+        let s = sections(&course.title)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         available_sections.insert(course.clone(), s);
     }
 
     let plan = Plan {
+        available_courses: required_courses
+            .iter()
+            .cloned()
+            .chain(optional_courses.iter().cloned())
+            .collect(),
         required_courses,
         available_sections,
         avoid_instructors,
         avoid_time_ranges,
         seats_required,
+        min_credits,
     };
 
     let mut all = vec![];
     for _ in 0..100 {
         let found = solve_plan(plan.clone())?;
-        all.push(found.into_iter().collect());
+        all.push(found.into_iter().map(|x| (x.0.title, x.1)).collect());
     }
 
     Ok(Json(all.into_iter().collect()))
@@ -205,7 +197,7 @@ async fn get_available_majors() -> Result<Json<HashMap<String, String>>, StatusC
 
 async fn get_available_courses(
     Path(major): Path<String>,
-) -> Result<Json<HashMap<String, CourseInfo>>, StatusCode> {
+) -> Result<Json<HashMap<String, DetailedCourseInfo>>, StatusCode> {
     Ok(Json(courses(&major).await.map_err(|e| {
         dbg!(&e);
         StatusCode::INTERNAL_SERVER_ERROR
@@ -218,7 +210,6 @@ async fn main() -> Result<()> {
         .route("/", get(|| async { "UMDB" }))
         .route("/majors", get(get_available_majors))
         .route("/courses/:major", get(get_available_courses))
-        .route("/build_schedule", post(build_schedule))
         .route("/build_schedules", post(build_schedules))
         .layer(CorsLayer::permissive().allow_headers(vec![
             AUTHORIZATION,
