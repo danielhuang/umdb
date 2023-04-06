@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     net::SocketAddr,
     time::Instant,
 };
@@ -7,16 +7,17 @@ use std::{
 use crate::api::{
     available_majors, courses, sections, CourseInfo, SectionInfo, TimeRange, Timeslot,
 };
-use api::DetailedCourseInfo;
+use api::{add_grades, get_grades, DetailedCourseInfo, GradesEntry};
 use axum::{
     extract::Path,
     routing::{get, post},
     Json, Router,
 };
 use eyre::Result;
+use futures::future::try_join_all;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
-use rand::{seq::SliceRandom, thread_rng};
+use rand::{rngs::StdRng, seq::SliceRandom, thread_rng, SeedableRng};
 use reqwest::{
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, REFERER},
     Client, StatusCode,
@@ -37,10 +38,10 @@ pub struct CourseId {
 
 #[derive(Debug, Clone)]
 struct Plan {
-    required_courses: HashSet<CourseInfo>,
+    required_courses: BTreeSet<CourseInfo>,
     available_courses: Vec<CourseInfo>,
-    available_sections: HashMap<CourseInfo, Vec<SectionInfo>>,
-    avoid_instructors: HashSet<String>,
+    available_sections: BTreeMap<CourseInfo, Vec<SectionInfo>>,
+    avoid_instructors: BTreeSet<String>,
     avoid_time_ranges: Vec<TimeRange>,
     seats_required: i32,
     min_credits: i32,
@@ -82,12 +83,18 @@ fn section_must_avoid(x: &SectionInfo, avoid: impl Iterator<Item = TimeRange>) -
 #[error("constraints not satisfiable")]
 struct Unsolvable;
 
-fn solve(plan: &mut Plan, found: &mut HashMap<CourseInfo, SectionInfo>) -> Result<(), Unsolvable> {
+fn solve(
+    plan: &mut Plan,
+    found: &mut BTreeMap<CourseInfo, SectionInfo>,
+    seed: usize,
+) -> Result<(), Unsolvable> {
     if (found.iter().map(|x| x.0.credits).sum::<i32>() >= plan.min_credits)
         && plan.required_courses.iter().all(|x| found.contains_key(x))
     {
         return Ok(());
     }
+
+    let mut rng = StdRng::from_seed(seed.to_be_bytes().repeat(4).try_into().unwrap());
 
     for available_course in plan
         .available_courses
@@ -97,7 +104,7 @@ fn solve(plan: &mut Plan, found: &mut HashMap<CourseInfo, SectionInfo>) -> Resul
         .sorted_by_key(|x| !plan.required_courses.contains(x))
     {
         let mut available = plan.available_sections[&available_course].clone();
-        available.shuffle(&mut thread_rng());
+        available.shuffle(&mut rng);
 
         for section in available {
             if !section_conflict(found.values().cloned(), &section)
@@ -107,7 +114,7 @@ fn solve(plan: &mut Plan, found: &mut HashMap<CourseInfo, SectionInfo>) -> Resul
             {
                 found.insert(available_course.clone(), section);
 
-                if let Ok(()) = solve(plan, found) {
+                if let Ok(()) = solve(plan, found, seed) {
                     return Ok(());
                 }
 
@@ -121,9 +128,9 @@ fn solve(plan: &mut Plan, found: &mut HashMap<CourseInfo, SectionInfo>) -> Resul
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct ScheduleRequest {
-    required_courses: HashSet<CourseInfo>,
+    required_courses: BTreeSet<CourseInfo>,
     optional_courses: Vec<CourseInfo>,
-    avoid_instructors: HashSet<String>,
+    avoid_instructors: BTreeSet<String>,
     avoid_time_ranges: Vec<TimeRange>,
     #[serde(default)]
     seats_required: i32,
@@ -131,21 +138,29 @@ pub struct ScheduleRequest {
     min_credits: i32,
 }
 
-fn solve_plan(mut plan: Plan) -> Result<HashMap<CourseInfo, SectionInfo>, StatusCode> {
+fn solve_plan(
+    mut plan: Plan,
+    seed: usize,
+) -> Result<BTreeMap<CourseInfo, SectionInfo>, StatusCode> {
     let start = Instant::now();
-    let mut found = HashMap::new();
-    solve(&mut plan, &mut found).map_err(|e| {
+    let mut found = BTreeMap::new();
+    solve(&mut plan, &mut found, seed).map_err(|e| {
         dbg!(&e);
-        dbg!(&start.elapsed());
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    dbg!(&start.elapsed());
     Ok(found.into_iter().collect())
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+pub struct ScheduleEntry {
+    #[serde(flatten)]
+    pub section_info: SectionInfo,
+    pub grades: BTreeMap<String, i32>,
 }
 
 async fn build_schedules(
     Json(req): Json<ScheduleRequest>,
-) -> Result<Json<HashSet<BTreeMap<String, SectionInfo>>>, StatusCode> {
+) -> Result<Json<BTreeSet<BTreeMap<String, ScheduleEntry>>>, StatusCode> {
     let ScheduleRequest {
         required_courses,
         avoid_instructors,
@@ -155,13 +170,28 @@ async fn build_schedules(
         min_credits,
     } = req;
 
-    let mut available_sections = HashMap::new();
+    let mut available_sections = BTreeMap::new();
+    let mut grades = BTreeMap::new();
 
-    for course in required_courses.iter().chain(optional_courses.iter()) {
-        let s = sections(&course.title)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    for (course, s, g) in try_join_all(required_courses.iter().chain(optional_courses.iter()).map(
+        |course| async move {
+            let s = sections(&course.title)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            let g = get_grades(course.title.to_string()).await.map_err(|e| {
+                dbg!(&e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+            Ok((course.clone(), s, g))
+                as Result<(CourseInfo, Vec<SectionInfo>, Vec<GradesEntry>), StatusCode>
+        },
+    ))
+    .await?
+    {
         available_sections.insert(course.clone(), s);
+        grades.insert(course.clone(), g);
     }
 
     let plan = Plan {
@@ -179,15 +209,35 @@ async fn build_schedules(
     };
 
     let mut all = vec![];
-    for _ in 0..100 {
-        let found = solve_plan(plan.clone())?;
-        all.push(found.into_iter().map(|x| (x.0.title, x.1)).collect());
+    for seed in 0..100 {
+        let found = solve_plan(plan.clone(), seed)?;
+        let post = Instant::now();
+        all.push(
+            found
+                .into_iter()
+                .map(|x| {
+                    let section_info = x.1;
+                    (
+                        x.0.title.to_string(),
+                        ScheduleEntry {
+                            grades: grades[&x.0]
+                                .iter()
+                                .filter(|x| x.professor == Some(section_info.prof.to_string()))
+                                .map(|x| x.grades.clone())
+                                .fold(BTreeMap::new(), |a, b| add_grades(&a, &b)),
+                            section_info,
+                        },
+                    )
+                })
+                .collect(),
+        );
+        dbg!(&post.elapsed());
     }
 
     Ok(Json(all.into_iter().collect()))
 }
 
-async fn get_available_majors() -> Result<Json<HashMap<String, String>>, StatusCode> {
+async fn get_available_majors() -> Result<Json<BTreeMap<String, String>>, StatusCode> {
     Ok(Json(
         available_majors()
             .await
@@ -197,7 +247,7 @@ async fn get_available_majors() -> Result<Json<HashMap<String, String>>, StatusC
 
 async fn get_available_courses(
     Path(major): Path<String>,
-) -> Result<Json<HashMap<String, DetailedCourseInfo>>, StatusCode> {
+) -> Result<Json<BTreeMap<String, DetailedCourseInfo>>, StatusCode> {
     Ok(Json(courses(&major).await.map_err(|e| {
         dbg!(&e);
         StatusCode::INTERNAL_SERVER_ERROR

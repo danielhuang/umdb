@@ -1,5 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
+use cached::proc_macro::cached;
+use derive_more::Add;
 use eyre::Result;
 use itertools::Itertools;
 use scraper::{Html, Selector};
@@ -7,13 +9,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::CLIENT;
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug, Default, PartialOrd, Ord)]
 pub struct TimeRange {
     pub start_time: i32,
     pub end_time: i32,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub enum Weekday {
     Monday,
     Tuesday,
@@ -22,7 +24,7 @@ pub enum Weekday {
     Friday,
 }
 
-#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash, PartialOrd, Ord)]
 pub struct Timeslot {
     pub location: String,
     pub days: Vec<Weekday>,
@@ -36,7 +38,7 @@ pub struct Instructor {
     pub fname: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct CourseInfo {
     pub title: String,
     pub credits: i32,
@@ -50,7 +52,7 @@ pub struct DetailedCourseInfo {
     pub geneds: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct SectionInfo {
     pub id: String,
     pub prof: String,
@@ -60,7 +62,7 @@ pub struct SectionInfo {
     pub timeslots: Vec<Timeslot>,
 }
 
-pub async fn available_majors() -> Result<HashMap<String, String>> {
+pub async fn available_majors() -> Result<BTreeMap<String, String>> {
     let html = CLIENT
         .get("https://app.testudo.umd.edu/soc/")
         .send()
@@ -84,7 +86,7 @@ pub async fn available_majors() -> Result<HashMap<String, String>> {
     Ok(rows)
 }
 
-pub async fn courses(major: &str) -> Result<HashMap<String, DetailedCourseInfo>> {
+pub async fn courses(major: &str) -> Result<BTreeMap<String, DetailedCourseInfo>> {
     let html = CLIENT
         .get(format!("https://app.testudo.umd.edu/soc/202301/{}", major))
         .send()
@@ -298,4 +300,39 @@ pub async fn sections(id: &str) -> Result<Vec<SectionInfo>> {
     });
 
     Ok(r.collect())
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Hash)]
+pub struct GradesEntry {
+    pub course: String,
+    pub professor: Option<String>,
+    pub semester: String,
+    pub section: String,
+    #[serde(flatten)]
+    pub grades: BTreeMap<String, i32>,
+}
+
+pub fn add_grades(a: &BTreeMap<String, i32>, b: &BTreeMap<String, i32>) -> BTreeMap<String, i32> {
+    let mut new: BTreeMap<_, _> = a
+        .keys()
+        .chain(b.keys())
+        .map(|x| (x.to_string(), 0))
+        .collect();
+    for (k, v) in a.iter().chain(b.iter()) {
+        let prev = new[k];
+        new.insert(k.to_string(), prev + v);
+    }
+    new
+}
+
+#[cached(time = 1800, result)]
+pub async fn get_grades(course: String) -> Result<Vec<GradesEntry>> {
+    println!("loading planetterp {}", course);
+    Ok(CLIENT
+        .get("https://planetterp.com/api/v1/grades")
+        .query(&[("course", course)])
+        .send()
+        .await?
+        .json()
+        .await?)
 }
