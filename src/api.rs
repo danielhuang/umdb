@@ -88,7 +88,7 @@ pub async fn available_majors() -> Result<BTreeMap<String, String>> {
 
 pub async fn courses(major: &str) -> Result<BTreeMap<String, DetailedCourseInfo>> {
     let html = CLIENT
-        .get(format!("https://app.testudo.umd.edu/soc/202301/{}", major))
+        .get(format!("https://app.testudo.umd.edu/soc/202308/{}", major))
         .send()
         .await?
         .text()
@@ -163,7 +163,7 @@ pub async fn sections(id: &str) -> Result<Vec<SectionInfo>> {
     dbg!(&id);
 
     let html = CLIENT
-        .get("https://app.testudo.umd.edu/soc/202301/sections")
+        .get("https://app.testudo.umd.edu/soc/202308/sections")
         .query(&[("courseIds", id)])
         .send()
         .await?
