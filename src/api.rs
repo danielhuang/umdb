@@ -1,8 +1,11 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use cached::proc_macro::cached;
-use derive_more::Add;
 use eyre::Result;
+use futures::{
+    future::{BoxFuture, Shared},
+    FutureExt, TryFutureExt,
+};
 use itertools::Itertools;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
@@ -32,16 +35,9 @@ pub struct Timeslot {
     pub discussion: bool,
 }
 
-#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
-pub struct Instructor {
-    pub lname: String,
-    pub fname: String,
-}
-
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct CourseInfo {
     pub title: String,
-    pub credits: i32,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug)]
@@ -54,7 +50,7 @@ pub struct DetailedCourseInfo {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct SectionInfo {
-    pub id: String,
+    pub section_id: String,
     pub prof: String,
     pub total_seats: i32,
     pub open_seats: i32,
@@ -62,6 +58,7 @@ pub struct SectionInfo {
     pub timeslots: Vec<Timeslot>,
 }
 
+#[cached(time = 3600, result)]
 pub async fn available_majors() -> Result<BTreeMap<String, String>> {
     let html = CLIENT
         .get("https://app.testudo.umd.edu/soc/")
@@ -86,9 +83,10 @@ pub async fn available_majors() -> Result<BTreeMap<String, String>> {
     Ok(rows)
 }
 
-pub async fn courses(major: &str) -> Result<BTreeMap<String, DetailedCourseInfo>> {
+#[cached(time = 3600, result)]
+pub async fn courses(major: String) -> Result<BTreeMap<String, DetailedCourseInfo>> {
     let html = CLIENT
-        .get(format!("https://app.testudo.umd.edu/soc/202308/{}", major))
+        .get(format!("https://app.testudo.umd.edu/soc/202408/{}", major))
         .send()
         .await?
         .text()
@@ -159,11 +157,12 @@ fn parse_time(s: &str) -> Option<i32> {
     })
 }
 
-pub async fn sections(id: &str) -> Result<Vec<SectionInfo>> {
+#[cached(time = 180, result)]
+pub async fn sections(id: String) -> Result<Vec<SectionInfo>> {
     dbg!(&id);
 
     let html = CLIENT
-        .get("https://app.testudo.umd.edu/soc/202308/sections")
+        .get("https://app.testudo.umd.edu/soc/202408/sections")
         .query(&[("courseIds", id)])
         .send()
         .await?
@@ -290,7 +289,7 @@ pub async fn sections(id: &str) -> Result<Vec<SectionInfo>> {
             .collect();
 
         Some(SectionInfo {
-            id,
+            section_id: id,
             prof,
             total_seats,
             open_seats,
@@ -325,14 +324,20 @@ pub fn add_grades(a: &BTreeMap<String, i32>, b: &BTreeMap<String, i32>) -> BTree
     new
 }
 
-#[cached(time = 1800, result)]
-pub async fn get_grades(course: String) -> Result<Vec<GradesEntry>> {
-    println!("loading planetterp {}", course);
-    Ok(CLIENT
-        .get("https://planetterp.com/api/v1/grades")
-        .query(&[("course", course)])
-        .send()
-        .await?
-        .json()
-        .await?)
+#[cached(time = 1800)]
+pub fn get_grades(course: String) -> Shared<BoxFuture<'static, Result<Vec<GradesEntry>, String>>> {
+    async fn inner(course: String) -> Result<Vec<GradesEntry>> {
+        println!("loading planetterp {}", course);
+        let grades = CLIENT
+            .get("https://planetterp.com/api/v1/grades")
+            .query(&[("course", &course)])
+            .send()
+            .await?
+            .json()
+            .await?;
+        println!("loaded planetterp {}", course);
+        Ok(grades)
+    }
+
+    inner(course).map_err(|e| e.to_string()).boxed().shared()
 }
