@@ -32,6 +32,8 @@ use tower_http::cors::CorsLayer;
 
 mod api;
 
+pub const TERM: &str = "202501";
+
 pub static CLIENT: Lazy<Client> = Lazy::new(Client::new);
 
 use tikv_jemallocator::Jemalloc;

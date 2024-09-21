@@ -10,7 +10,7 @@ use itertools::Itertools;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 
-use crate::CLIENT;
+use crate::{CLIENT, TERM};
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug, Default, PartialOrd, Ord)]
 pub struct TimeRange {
@@ -86,7 +86,7 @@ pub async fn available_majors() -> Result<BTreeMap<String, String>> {
 #[cached(time = 3600, result)]
 pub async fn courses(major: String) -> Result<BTreeMap<String, DetailedCourseInfo>> {
     let html = CLIENT
-        .get(format!("https://app.testudo.umd.edu/soc/202408/{}", major))
+        .get(format!("https://app.testudo.umd.edu/soc/{TERM}/{}", major))
         .send()
         .await?
         .text()
@@ -162,7 +162,7 @@ pub async fn sections(id: String) -> Result<Vec<SectionInfo>> {
     dbg!(&id);
 
     let html = CLIENT
-        .get("https://app.testudo.umd.edu/soc/202408/sections")
+        .get(format!("https://app.testudo.umd.edu/soc/{TERM}/sections"))
         .query(&[("courseIds", id)])
         .send()
         .await?
@@ -298,7 +298,7 @@ pub async fn sections(id: String) -> Result<Vec<SectionInfo>> {
         })
     });
 
-    Ok(r.collect())
+    Ok(dbg!(r.collect()))
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Hash)]
