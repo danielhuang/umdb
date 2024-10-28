@@ -56,6 +56,7 @@ struct Plan {
     avoid_weekdays: HashSet<Weekday>,
     seats_required: i32,
     min_course_count: i32,
+    optional_courses: BTreeSet<CourseInfo>,
 }
 
 fn timeslot_conflict(a: &Timeslot, b: &Timeslot) -> bool {
@@ -120,7 +121,7 @@ fn solve(
 
     let mut rng = StdRng::seed_from_u64(seed);
 
-    for (_, group) in plan
+    for available_course in plan
         .required_course_groups
         .iter()
         .enumerate()
@@ -131,53 +132,61 @@ fn solve(
                 x.courses.len(),
             )
         })
-        .map(|(i, x)| (i, x.clone()))
+        .flat_map(|(_, group)| {
+            let mut courses = group.courses.iter().cloned().collect_vec();
+            courses.shuffle(&mut rng);
+            courses
+                .into_iter()
+                .filter(|x| !selected_courses.contains_key(x))
+                .sorted_by_key(|x| {
+                    !plan
+                        .required_course_groups
+                        .iter()
+                        .flat_map(|x| &x.courses)
+                        .any(|o| o == x)
+                })
+                .collect_vec()
+        })
+        .chain(plan.optional_courses.iter().cloned())
         .collect_vec()
     {
-        let mut courses = group.courses.iter().collect_vec();
-        courses.shuffle(&mut rng);
+        let mut available = plan.available_sections[&available_course].clone();
+        available.shuffle(&mut rng);
+        available.sort_by_key(|x| x.timeslots.len());
 
-        for available_course in courses
-            .iter()
-            .filter(|x| !selected_courses.contains_key(x))
-            .sorted_by_key(|x| {
-                !plan
-                    .required_course_groups
+        for section in available {
+            if !section_conflict(selected_courses.values(), &section)
+                && !plan.avoid_instructors.contains(&section.prof)
+                && !section_must_avoid(&section, plan.avoid_time_ranges.iter().cloned())
+                && (section.open_seats - section.waitlist_seats) >= plan.seats_required
+                && section
+                    .timeslots
                     .iter()
-                    .flat_map(|x| &x.courses)
-                    .any(|o| &o == *x)
-            })
-            .cloned()
-            .collect_vec()
-        {
-            let mut available = plan.available_sections[available_course].clone();
-            available.shuffle(&mut rng);
-            available.sort_by_key(|x| x.timeslots.len());
-
-            for section in available {
-                if !section_conflict(selected_courses.values(), &section)
-                    && !plan.avoid_instructors.contains(&section.prof)
-                    && !section_must_avoid(&section, plan.avoid_time_ranges.iter().cloned())
-                    && (section.open_seats - section.waitlist_seats) >= plan.seats_required
-                    && section
-                        .timeslots
-                        .iter()
-                        .flat_map(|x| &x.days)
-                        .all(|x| !plan.avoid_weekdays.contains(x))
+                    .flat_map(|x| &x.days)
+                    .all(|x| !plan.avoid_weekdays.contains(x))
+            {
+                selected_courses.insert(available_course.clone(), section);
+                for i in plan
+                    .course_to_group_map
+                    .get_vec(&available_course)
+                    .cloned()
+                    .unwrap_or_default()
                 {
-                    selected_courses.insert(available_course.clone(), section);
-                    for &i in plan.course_to_group_map.get_vec(available_course).unwrap() {
-                        group_fill_count[i] += 1;
-                    }
+                    group_fill_count[i] += 1;
+                }
 
-                    if let Ok(()) = solve(plan, selected_courses, unsat, group_fill_count, seed) {
-                        return Ok(());
-                    }
+                if let Ok(()) = solve(plan, selected_courses, unsat, group_fill_count, seed) {
+                    return Ok(());
+                }
 
-                    selected_courses.remove(available_course);
-                    for &i in plan.course_to_group_map.get_vec(available_course).unwrap() {
-                        group_fill_count[i] -= 1;
-                    }
+                selected_courses.remove(&available_course);
+                for i in plan
+                    .course_to_group_map
+                    .get_vec(&available_course)
+                    .cloned()
+                    .unwrap_or_default()
+                {
+                    group_fill_count[i] -= 1;
                 }
             }
         }
@@ -368,6 +377,7 @@ async fn build_schedules(
             .flat_map(|(i, x)| x.courses.iter().map(move |c| (c.clone(), i)))
             .collect(),
         required_course_groups,
+        optional_courses,
     };
 
     let start = Instant::now();
