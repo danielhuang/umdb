@@ -102,7 +102,7 @@ fn solve(
     selected_courses: &mut BTreeMap<CourseInfo, SectionInfo>,
     unsat: &mut FxHashSet<BTreeMap<CourseInfo, SectionInfo>>,
     group_fill_count: &mut Vec<usize>,
-    seed: usize,
+    seed: u64,
 ) -> Result<(), Unsatisfiable> {
     if (selected_courses.iter().count() as i32 >= plan.min_course_count)
         && plan
@@ -118,14 +118,19 @@ fn solve(
         return Err(Unsatisfiable);
     }
 
-    let mut rng = StdRng::from_seed(seed.to_be_bytes().repeat(4).try_into().unwrap());
+    let mut rng = StdRng::seed_from_u64(seed);
 
     for (_, group) in plan
         .required_course_groups
         .iter()
         .enumerate()
-        .filter(|(i, x)| x.choose_n > group_fill_count[*i])
-        .sorted_by_key(|(_, x)| (x.choose_n, x.courses.len()))
+        .sorted_by_key(|(i, x)| {
+            (
+                group_fill_count[*i] >= x.choose_n,
+                x.choose_n,
+                x.courses.len(),
+            )
+        })
         .map(|(i, x)| (i, x.clone()))
         .collect_vec()
     {
@@ -232,7 +237,7 @@ fn solve_plan(
         &mut selected_courses,
         unsat,
         &mut group_fill_count,
-        seed,
+        seed as u64,
     )?;
     Ok(selected_courses.into_iter().collect())
 }
