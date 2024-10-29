@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use cached::proc_macro::cached;
-use eyre::Result;
+use eyre::{eyre, Result};
 use futures::{
     future::{BoxFuture, Shared},
     FutureExt, TryFutureExt,
@@ -37,13 +37,27 @@ pub struct Timeslot {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct CourseInfo {
-    pub title: String,
+    pub id: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug)]
+impl CourseInfo {
+    pub async fn with_detail(&self) -> Result<DetailedCourseInfo> {
+        let major: String = self.id.chars().take_while(|x| x.is_alphabetic()).collect();
+        dbg!(&major);
+        let courses = courses(major).await?;
+        dbg!(&courses);
+        Ok(courses
+            .get(&self.id)
+            .cloned()
+            .ok_or_else(|| eyre!("course does not exist"))?)
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct DetailedCourseInfo {
+    pub course: CourseInfo,
     pub title: String,
-    pub credits: i32,
+    pub credits: usize,
     pub desc: String,
     pub geneds: Vec<String>,
 }
@@ -103,6 +117,8 @@ pub async fn courses(major: String) -> Result<BTreeMap<String, DetailedCourseInf
             .next()?
             .to_string();
 
+        dbg!(&id);
+
         let title = row
             .select(&Selector::parse(".course-title").unwrap())
             .next()?
@@ -110,12 +126,16 @@ pub async fn courses(major: String) -> Result<BTreeMap<String, DetailedCourseInf
             .next()?
             .to_string();
 
+        dbg!(&title);
+
         let desc = row
-            .select(&Selector::parse(".approved-course-text").unwrap())
+            .select(&Selector::parse(".course-text").unwrap())
             .last()?
             .text()
             .next()?
             .to_string();
+
+        dbg!(&desc);
 
         let credits = row
             .select(&Selector::parse(".course-min-credits").unwrap())
@@ -125,14 +145,19 @@ pub async fn courses(major: String) -> Result<BTreeMap<String, DetailedCourseInf
             .parse()
             .ok()?;
 
+        dbg!(&credits);
+
         let geneds = row
             .select(&Selector::parse(".course-subcategory").unwrap())
             .map(|x| x.text().collect::<String>().trim().to_string())
             .collect();
 
+        dbg!(&geneds);
+
         Some((
-            id,
+            id.clone(),
             DetailedCourseInfo {
+                course: CourseInfo { id },
                 title,
                 credits,
                 desc,
