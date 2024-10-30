@@ -58,7 +58,7 @@ pub struct DetailedCourseInfo {
     pub course: CourseInfo,
     pub title: String,
     pub credits: usize,
-    pub desc: String,
+    pub desc: Option<String>,
     pub geneds: Vec<String>,
 }
 
@@ -129,11 +129,10 @@ pub async fn courses(major: String) -> Result<BTreeMap<String, DetailedCourseInf
         dbg!(&title);
 
         let desc = row
-            .select(&Selector::parse(".course-text").unwrap())
-            .last()?
-            .text()
-            .next()?
-            .to_string();
+            .select(&Selector::parse(".course-text, .approved-course-text").unwrap())
+            .last()
+            .and_then(|x| x.text().next())
+            .map(|x| x.to_string());
 
         dbg!(&desc);
 

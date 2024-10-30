@@ -104,7 +104,7 @@ fn solve(
     unsat: &mut FxHashSet<BTreeMap<CourseInfo, SectionInfo>>,
     group_fill_count: &mut Vec<usize>,
     credit_count: &mut usize,
-    seed: u64,
+    rng: &mut StdRng,
 ) -> Result<(), Unsatisfiable> {
     if (*credit_count >= plan.min_credit_count)
         && plan
@@ -120,22 +120,25 @@ fn solve(
         return Err(Unsatisfiable);
     }
 
-    let mut rng = StdRng::seed_from_u64(seed);
+    let mut available_courses = plan.required_course_groups.iter().enumerate().collect_vec();
+    // available_courses.shuffle(rng);
 
-    for available_course in plan
-        .required_course_groups
-        .iter()
-        .enumerate()
+    let available_courses = available_courses
+        .into_iter()
         .sorted_by_key(|(i, x)| {
             (
+                x.courses
+                    .iter()
+                    .map(|x| plan.available_sections[x].len())
+                    .sum::<usize>(),
                 group_fill_count[*i] >= x.choose_n,
-                x.choose_n,
                 x.courses.len(),
+                x.choose_n,
             )
         })
         .flat_map(|(_, group)| {
             let mut courses = group.courses.iter().cloned().collect_vec();
-            courses.shuffle(&mut rng);
+            courses.shuffle(rng);
             courses
                 .into_iter()
                 .filter(|x| !selected_courses.contains_key(&x.course))
@@ -148,25 +151,37 @@ fn solve(
                 })
                 .collect_vec()
         })
-        .chain(plan.optional_courses.iter().cloned())
-        .collect_vec()
-    {
+        .chain(
+            plan.optional_courses
+                .iter()
+                .sorted_by_key(|x| plan.available_sections[x].len())
+                .cloned(),
+        )
+        .collect_vec();
+
+    for available_course in available_courses {
         let mut available = plan.available_sections[&available_course].clone();
-        available.shuffle(&mut rng);
+        available.shuffle(rng);
         available.sort_by_key(|x| x.timeslots.len());
 
         for section in available {
-            if !section_conflict(selected_courses.values(), &section)
-                && !plan.avoid_instructors.contains(&section.prof)
+            if (section.open_seats - section.waitlist_seats) >= plan.seats_required
                 && !section_must_avoid(&section, plan.avoid_time_ranges.iter().cloned())
-                && (section.open_seats - section.waitlist_seats) >= plan.seats_required
+                && !section_conflict(selected_courses.values(), &section)
+                && !plan.avoid_instructors.contains(&section.prof)
                 && section
                     .timeslots
                     .iter()
                     .flat_map(|x| &x.days)
                     .all(|x| !plan.avoid_weekdays.contains(x))
             {
-                selected_courses.insert(available_course.course.clone(), section);
+                if selected_courses
+                    .insert(available_course.course.clone(), section.clone())
+                    .is_some()
+                {
+                    continue;
+                }
+
                 for i in plan
                     .course_to_group_map
                     .get_vec(&available_course)
@@ -183,7 +198,7 @@ fn solve(
                     unsat,
                     group_fill_count,
                     credit_count,
-                    seed,
+                    rng,
                 ) {
                     return Ok(());
                 }
@@ -226,10 +241,11 @@ pub struct DetailedCourseGroup {
 }
 
 impl CourseGroup {
-    async fn to_detailed(self) -> Result<DetailedCourseGroup> {
+    async fn with_detail(&self) -> Result<DetailedCourseGroup> {
         let courses = try_join_all(
             self.courses
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|course| async move { course.with_detail().await }),
         )
         .await?;
@@ -279,7 +295,7 @@ fn solve_plan(
         unsat,
         &mut group_fill_count,
         &mut 0,
-        seed as u64,
+        &mut StdRng::seed_from_u64(seed as u64),
     )?;
     Ok(selected_courses.into_iter().collect())
 }
@@ -375,7 +391,7 @@ async fn build_schedules(
     {
         available_sections.insert(
             course.with_detail().await.map_err(|x| {
-                dbg!(&x);
+                dbg!(&course, &x);
                 StatusCode::INTERNAL_SERVER_ERROR
             })?,
             s,
@@ -431,7 +447,7 @@ async fn build_schedules(
         required_course_groups: try_join_all(
             required_course_groups
                 .into_iter()
-                .map(|g| async move { g.to_detailed().await }),
+                .map(|g| async move { g.with_detail().await }),
         )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
