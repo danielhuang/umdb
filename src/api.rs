@@ -43,13 +43,13 @@ pub struct CourseInfo {
 impl CourseInfo {
     pub async fn with_detail(&self) -> Result<DetailedCourseInfo> {
         let major: String = self.id.chars().take_while(|x| x.is_alphabetic()).collect();
-        dbg!(&major);
+        // dbg!(&major);
         let courses = courses(major).await?;
-        dbg!(&courses);
-        Ok(courses
+        // dbg!(&courses);
+        courses
             .get(&self.id)
             .cloned()
-            .ok_or_else(|| eyre!("course does not exist"))?)
+            .ok_or_else(|| eyre!("course does not exist"))
     }
 }
 

@@ -51,10 +51,6 @@ struct Plan {
     required_course_groups: Vec<DetailedCourseGroup>,
     course_to_group_map: MultiMap<DetailedCourseInfo, usize>,
     available_sections: BTreeMap<DetailedCourseInfo, Vec<SectionInfo>>,
-    avoid_instructors: HashSet<String>,
-    avoid_time_ranges: Vec<TimeRange>,
-    avoid_weekdays: HashSet<Weekday>,
-    seats_required: i32,
     min_credit_count: usize,
     optional_courses: BTreeSet<DetailedCourseInfo>,
 }
@@ -104,8 +100,12 @@ fn solve(
     unsat: &mut FxHashSet<BTreeMap<CourseInfo, SectionInfo>>,
     group_fill_count: &mut Vec<usize>,
     credit_count: &mut usize,
-    rng: &mut StdRng,
+    output: &mut Vec<BTreeMap<CourseInfo, SectionInfo>>,
 ) -> Result<(), Unsatisfiable> {
+    if output.len() > 1000 {
+        return Ok(());
+    }
+
     if (*credit_count >= plan.min_credit_count)
         && plan
             .required_course_groups
@@ -113,6 +113,7 @@ fn solve(
             .enumerate()
             .all(|(group_i, group)| group_fill_count[group_i] >= group.choose_n)
     {
+        output.push(selected_courses.clone());
         return Ok(());
     }
 
@@ -120,11 +121,12 @@ fn solve(
         return Err(Unsatisfiable);
     }
 
-    let mut available_courses = plan.required_course_groups.iter().enumerate().collect_vec();
-    // available_courses.shuffle(rng);
+    let mut ok = false;
 
-    let available_courses = available_courses
-        .into_iter()
+    let available_courses = plan
+        .required_course_groups
+        .iter()
+        .enumerate()
         .sorted_by_key(|(i, x)| {
             (
                 x.courses
@@ -137,11 +139,11 @@ fn solve(
             )
         })
         .flat_map(|(_, group)| {
-            let mut courses = group.courses.iter().cloned().collect_vec();
-            courses.shuffle(rng);
-            courses
-                .into_iter()
-                .filter(|x| !selected_courses.contains_key(&x.course))
+            group
+                .courses
+                .iter()
+                .filter(|&x| !selected_courses.contains_key(&x.course))
+                .cloned()
                 .sorted_by_key(|x| {
                     !plan
                         .required_course_groups
@@ -154,6 +156,7 @@ fn solve(
         .chain(
             plan.optional_courses
                 .iter()
+                .filter(|x| !selected_courses.contains_key(&x.course))
                 .sorted_by_key(|x| plan.available_sections[x].len())
                 .cloned(),
         )
@@ -161,20 +164,11 @@ fn solve(
 
     for available_course in available_courses {
         let mut available = plan.available_sections[&available_course].clone();
-        available.shuffle(rng);
+        // available.shuffle(rng);
         available.sort_by_key(|x| x.timeslots.len());
 
         for section in available {
-            if (section.open_seats - section.waitlist_seats) >= plan.seats_required
-                && !section_must_avoid(&section, plan.avoid_time_ranges.iter().cloned())
-                && !section_conflict(selected_courses.values(), &section)
-                && !plan.avoid_instructors.contains(&section.prof)
-                && section
-                    .timeslots
-                    .iter()
-                    .flat_map(|x| &x.days)
-                    .all(|x| !plan.avoid_weekdays.contains(x))
-            {
+            if !section_conflict(selected_courses.values(), &section) {
                 if selected_courses
                     .insert(available_course.course.clone(), section.clone())
                     .is_some()
@@ -192,15 +186,17 @@ fn solve(
                 }
                 *credit_count += available_course.credits;
 
-                if let Ok(()) = solve(
+                if solve(
                     plan,
                     selected_courses,
                     unsat,
                     group_fill_count,
                     credit_count,
-                    rng,
-                ) {
-                    return Ok(());
+                    output,
+                )
+                .is_ok()
+                {
+                    ok = true;
                 }
 
                 selected_courses.remove(&available_course.course);
@@ -217,9 +213,12 @@ fn solve(
         }
     }
 
-    unsat.insert(selected_courses.clone());
-
-    Err(Unsatisfiable)
+    if ok {
+        Ok(())
+    } else {
+        unsat.insert(selected_courses.clone());
+        Err(Unsatisfiable)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
@@ -279,8 +278,8 @@ fn solve_plan(
     mut plan: Plan,
     mut selected_courses: BTreeMap<CourseInfo, SectionInfo>,
     unsat: &mut FxHashSet<BTreeMap<CourseInfo, SectionInfo>>,
-    seed: usize,
-) -> Result<BTreeMap<CourseInfo, SectionInfo>, Unsatisfiable> {
+    output: &mut Vec<BTreeMap<CourseInfo, SectionInfo>>,
+) {
     let mut group_fill_count = vec![0; plan.required_course_groups.len()];
     for (course, _) in selected_courses.iter() {
         for (i, group) in plan.required_course_groups.iter().enumerate() {
@@ -289,15 +288,14 @@ fn solve_plan(
             }
         }
     }
-    solve(
+    let _ = solve(
         &mut plan,
         &mut selected_courses,
         unsat,
         &mut group_fill_count,
         &mut 0,
-        &mut StdRng::seed_from_u64(seed as u64),
-    )?;
-    Ok(selected_courses.into_iter().collect())
+        output,
+    );
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
@@ -421,12 +419,28 @@ async fn build_schedules(
     }
 
     let plan = Plan {
-        available_sections,
-        avoid_instructors,
-        avoid_time_ranges,
-        seats_required,
+        available_sections: available_sections
+            .into_iter()
+            .map(|(course, sections)| {
+                (
+                    course,
+                    sections
+                        .into_iter()
+                        .filter(|section| {
+                            section.open_seats - section.waitlist_seats >= seats_required
+                                && !section_must_avoid(section, avoid_time_ranges.iter().cloned())
+                                && section
+                                    .timeslots
+                                    .iter()
+                                    .flat_map(|x| &x.days)
+                                    .all(|x| !avoid_weekdays.contains(x))
+                                && !avoid_instructors.contains(&section.prof)
+                        })
+                        .collect(),
+                )
+            })
+            .collect(),
         min_credit_count,
-        avoid_weekdays,
         course_to_group_map: {
             let mut map = MultiMap::new();
             for (i, group) in required_course_groups.iter().enumerate() {
@@ -462,21 +476,24 @@ async fn build_schedules(
         .collect(),
     };
 
+    dbg!(&plan);
+
     let start = Instant::now();
     let mut all = vec![];
     let mut cache = FxHashSet::default();
-    for seed in 0..options.count.unwrap_or(1000) {
-        let found =
-            block_in_place(|| solve_plan(plan.clone(), already_selected.clone(), &mut cache, seed));
 
-        let found = match found {
-            Ok(found) => found,
-            Err(Unsatisfiable) => {
-                dbg!(&already_selected, start.elapsed());
-                return Ok(Json(BTreeSet::new()));
-            }
-        };
+    let mut output = vec![];
 
+    block_in_place(|| {
+        solve_plan(
+            plan.clone(),
+            already_selected.clone(),
+            &mut cache,
+            &mut output,
+        )
+    });
+
+    for found in output {
         let courses: BTreeMap<_, _> = found
             .into_iter()
             .map(|(course, section)| {
@@ -509,12 +526,10 @@ async fn build_schedules(
             score: OrderedFloat(avg_gpa),
             courses,
         });
+    }
 
-        if start.elapsed() > Duration::from_secs(4) {
-            break;
-        }
-
-        tokio::task::yield_now().await;
+    if start.elapsed() > Duration::from_secs(4) {
+        println!("bailing!");
     }
 
     let total_len = all.len();
